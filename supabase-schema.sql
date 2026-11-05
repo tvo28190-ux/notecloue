@@ -1,7 +1,10 @@
--- Chạy toàn bộ đoạn SQL này trong Supabase Dashboard → SQL Editor → New query.
+-- NoteCloud không dùng đăng ký/đăng nhập người dùng.
+-- Mọi thao tác CRUD đi qua Edge Function note-api, được bảo vệ bằng NOTE_ADMIN_KEY.
+-- Chạy toàn bộ file này trong Supabase Dashboard → SQL Editor → New query.
+
 create table if not exists public.notes (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id) on delete cascade,
+  user_id uuid references auth.users(id) on delete cascade,
   title text not null default '',
   content text not null default '',
   is_pinned boolean not null default false,
@@ -11,37 +14,29 @@ create table if not exists public.notes (
   updated_at timestamptz not null default now()
 );
 
-create index if not exists notes_user_updated_idx
-  on public.notes (user_id, updated_at desc);
+-- Tương thích với bảng notes đã tạo theo hướng dẫn phiên bản đăng nhập trước đó.
+alter table public.notes add column if not exists user_id uuid references auth.users(id) on delete cascade;
+alter table public.notes alter column user_id drop not null;
+alter table public.notes add column if not exists title text not null default '';
+alter table public.notes add column if not exists content text not null default '';
+alter table public.notes add column if not exists is_pinned boolean not null default false;
+alter table public.notes add column if not exists is_archived boolean not null default false;
+alter table public.notes add column if not exists deleted_at timestamptz;
+alter table public.notes add column if not exists created_at timestamptz not null default now();
+alter table public.notes add column if not exists updated_at timestamptz not null default now();
 
+create index if not exists notes_updated_idx on public.notes (updated_at desc);
+
+-- Không cho anon/authenticated truy cập thẳng bảng notes.
+-- Edge Function sử dụng service_role ở máy chủ, không đưa khóa đó ra trình duyệt.
 alter table public.notes enable row level security;
-
 drop policy if exists "Users can read their own notes" on public.notes;
-create policy "Users can read their own notes"
-  on public.notes for select
-  using (auth.uid() = user_id);
-
 drop policy if exists "Users can create their own notes" on public.notes;
-create policy "Users can create their own notes"
-  on public.notes for insert
-  with check (auth.uid() = user_id);
-
 drop policy if exists "Users can update their own notes" on public.notes;
-create policy "Users can update their own notes"
-  on public.notes for update
-  using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
-
 drop policy if exists "Users can delete their own notes" on public.notes;
-create policy "Users can delete their own notes"
-  on public.notes for delete
-  using (auth.uid() = user_id);
+revoke all on table public.notes from anon, authenticated;
+grant select, insert, update, delete on table public.notes to service_role;
 
-
--- Cấp quyền ở mức bảng; RLS phía trên vẫn giới hạn từng tài khoản.
-grant select, insert, update, delete on public.notes to authenticated;
-
--- Tự cập nhật updated_at khi có chỉnh sửa.
 create or replace function public.notecloud_set_updated_at()
 returns trigger
 language plpgsql
@@ -56,16 +51,3 @@ drop trigger if exists notecloud_notes_updated_at on public.notes;
 create trigger notecloud_notes_updated_at
 before update on public.notes
 for each row execute function public.notecloud_set_updated_at();
-
--- Bật Realtime cho bảng notes để các thiết bị đang mở app nhận thay đổi.
-do $$
-begin
-  if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
-     and not exists (
-       select 1 from pg_publication_tables
-       where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'notes'
-     ) then
-    execute 'alter publication supabase_realtime add table public.notes';
-  end if;
-end;
-$$;

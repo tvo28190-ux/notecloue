@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  Archive, ArrowLeft, Check, ChevronDown, Cloud, FileText, LogOut, Menu,
+  Archive, ArrowLeft, Check, ChevronDown, Cloud, FileText, Lock,
   MoreHorizontal, Pin, Plus, Search, Settings, ShieldCheck, Trash2, X,
-  RotateCcw, PanelLeftClose, PanelLeftOpen, Smartphone, Laptop, Sparkles
+  RotateCcw, PanelLeftClose, PanelLeftOpen, Smartphone, Laptop, Sparkles,
+  KeyRound
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from './supabase';
 import './style.css';
@@ -14,6 +15,7 @@ const VIEWS = [
   { id: 'archive', label: 'Lưu trữ', icon: Archive },
   { id: 'trash', label: 'Thùng rác', icon: Trash2 },
 ];
+const ADMIN_KEY_STORAGE = 'notecloud_admin_key';
 
 function formatDate(value) {
   if (!value) return 'Vừa xong';
@@ -26,13 +28,11 @@ function excerpt(content) {
 }
 
 function App() {
-  const [session, setSession] = useState(null);
-  const [authReady, setAuthReady] = useState(false);
-  const [authMode, setAuthMode] = useState('login');
-  const [authEmail, setAuthEmail] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
-  const [authBusy, setAuthBusy] = useState(false);
-  const [authMessage, setAuthMessage] = useState('');
+  const [adminKey, setAdminKey] = useState('');
+  const [adminReady, setAdminReady] = useState(false);
+  const [keyInput, setKeyInput] = useState('');
+  const [keyBusy, setKeyBusy] = useState(false);
+  const [keyMessage, setKeyMessage] = useState('');
   const [notes, setNotes] = useState([]);
   const [loadingNotes, setLoadingNotes] = useState(false);
   const [view, setView] = useState('all');
@@ -54,19 +54,30 @@ function App() {
     toastTimer.current = setTimeout(() => setToast(''), 2600);
   }, []);
 
-  useEffect(() => {
-    if (!isSupabaseConfigured) {
-      setAuthReady(true);
-      return;
+  const requestApi = useCallback(async (key, action, payload = {}) => {
+    const { data, error } = await supabase.functions.invoke('note-api', {
+      body: { action, ...payload },
+      headers: { 'x-admin-key': key },
+    });
+    if (error) {
+      let message = error.message || 'Không kết nối được máy chủ.';
+      try {
+        const response = error.context;
+        if (response && typeof response.clone === 'function') {
+          const detail = await response.clone().json();
+          if (detail?.error) message = detail.error;
+        }
+      } catch { /* Giữ thông báo mặc định nếu phản hồi không phải JSON. */ }
+      throw new Error(message);
     }
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setAuthReady(true);
-    });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-    });
-    return () => listener.subscription.unsubscribe();
+    if (data?.error) throw new Error(data.error);
+    return data;
+  }, []);
+
+  useEffect(() => {
+    const savedKey = localStorage.getItem(ADMIN_KEY_STORAGE) || '';
+    if (savedKey) setAdminKey(savedKey);
+    setAdminReady(true);
   }, []);
 
   useEffect(() => {
@@ -84,51 +95,47 @@ function App() {
     }
   }, []);
 
-  const loadNotes = useCallback(async () => {
-    if (!session?.user?.id) return;
-    setLoadingNotes(true);
-    const { data, error } = await supabase
-      .from('notes')
-      .select('*')
-      .order('is_pinned', { ascending: false })
-      .order('updated_at', { ascending: false });
-    if (error) notify('Không tải được ghi chú: ' + error.message);
-    else {
-      setNotes(data || []);
-      setSelectedId((current) => current && data?.some((note) => note.id === current) ? current : null);
+  const loadNotes = useCallback(async (silent = false) => {
+    if (!adminKey) return;
+    if (!silent) setLoadingNotes(true);
+    try {
+      const result = await requestApi(adminKey, 'list');
+      const data = result?.notes || [];
+      setNotes(data);
+      setSelectedId((current) => current && data.some((note) => note.id === current) ? current : null);
+    } catch (error) {
+      const message = String(error.message || '');
+      if (/admin key|mã khóa|unauthorized|401/i.test(message)) {
+        localStorage.removeItem(ADMIN_KEY_STORAGE);
+        setAdminKey('');
+        setNotes([]);
+        setKeyMessage('Admin Key không đúng hoặc đã bị thay đổi. Hãy nhập lại.');
+      } else if (!silent) {
+        notify('Không tải được ghi chú: ' + message);
+      }
+    } finally {
+      if (!silent) setLoadingNotes(false);
     }
-    setLoadingNotes(false);
-  }, [session?.user?.id, notify]);
+  }, [adminKey, requestApi, notify]);
 
   useEffect(() => {
-    if (session) loadNotes();
-    else {
+    if (!adminKey) {
       setNotes([]);
       setSelectedId(null);
+      return undefined;
     }
-  }, [session?.user?.id, loadNotes]);
-
-  // Nhận thay đổi từ thiết bị khác khi cùng tài khoản đang mở ứng dụng.
-  useEffect(() => {
-    const userId = session?.user?.id;
-    if (!userId) return undefined;
-    const channel = supabase
-      .channel(`notes-sync-${userId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'notes', filter: `user_id=eq.${userId}` }, (payload) => {
-        if (payload.eventType === 'DELETE') {
-          const deletedId = payload.old?.id;
-          if (deletedId) setNotes((current) => current.filter((note) => note.id !== deletedId));
-          return;
-        }
-        const incoming = payload.new;
-        if (!incoming?.id) return;
-        setNotes((current) => current.some((note) => note.id === incoming.id)
-          ? current.map((note) => note.id === incoming.id ? { ...note, ...incoming } : note)
-          : [incoming, ...current]);
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [session?.user?.id]);
+    loadNotes();
+    // Làm mới định kỳ để các thiết bị khác thấy thay đổi mà không cần đăng nhập tài khoản.
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible' && pendingSaves.current.size === 0) loadNotes(true);
+    }, 10000);
+    const onFocus = () => loadNotes(true);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [adminKey, loadNotes]);
 
   const visibleNotes = useMemo(() => {
     const query = search.trim().toLocaleLowerCase('vi');
@@ -146,48 +153,53 @@ function App() {
 
   const selectedNote = notes.find((note) => note.id === selectedId) || null;
 
-  async function handleAuth(event) {
+  async function unlockApp(event) {
     event.preventDefault();
-    if (!authEmail.trim() || authPassword.length < 6) {
-      setAuthMessage('Nhập email hợp lệ và mật khẩu ít nhất 6 ký tự.');
+    const key = keyInput.trim();
+    if (key.length < 12) {
+      setKeyMessage('Admin Key cần có ít nhất 12 ký tự.');
       return;
     }
-    setAuthBusy(true);
-    setAuthMessage('');
-    const result = authMode === 'login'
-      ? await supabase.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword })
-      : await supabase.auth.signUp({ email: authEmail.trim(), password: authPassword });
-    setAuthBusy(false);
-    if (result.error) setAuthMessage(result.error.message);
-    else if (authMode === 'signup' && !result.data.session) {
-      setAuthMessage('Tài khoản đã được tạo. Hãy mở email để xác nhận, sau đó đăng nhập.');
-      setAuthMode('login');
-    } else {
-      setAuthMessage('');
-      setAuthPassword('');
+    setKeyBusy(true);
+    setKeyMessage('');
+    try {
+      const result = await requestApi(key, 'list');
+      localStorage.setItem(ADMIN_KEY_STORAGE, key);
+      setNotes(result?.notes || []);
+      setAdminKey(key);
+      setKeyInput('');
+      setKeyMessage('');
+    } catch (error) {
+      setKeyMessage('Không mở được NoteCloud. Hãy kiểm tra Admin Key và cấu hình Edge Function.');
+    } finally {
+      setKeyBusy(false);
     }
   }
 
-  async function signOut() {
-    await supabase.auth.signOut();
+  function lockApp() {
+    localStorage.removeItem(ADMIN_KEY_STORAGE);
+    setAdminKey('');
+    setKeyInput('');
+    setNotes([]);
+    setSelectedId(null);
     setMenuOpen(false);
     setView('all');
-    notify('Đã đăng xuất');
+    notify('Đã khóa NoteCloud trên thiết bị này');
   }
 
   async function createNote() {
-    if (!session?.user?.id) return;
-    const { data, error } = await supabase.from('notes').insert({
-      user_id: session.user.id,
-      title: '',
-      content: '',
-    }).select().single();
-    if (error) return notify('Không tạo được ghi chú: ' + error.message);
-    setNotes((current) => [data, ...current]);
-    setView('all');
-    setSearch('');
-    setSelectedId(data.id);
-    setMobileListOpen(false);
+    if (!adminKey) return;
+    try {
+      const result = await requestApi(adminKey, 'create', { title: '', content: '' });
+      const data = result.note;
+      setNotes((current) => [data, ...current]);
+      setView('all');
+      setSearch('');
+      setSelectedId(data.id);
+      setMobileListOpen(false);
+    } catch (error) {
+      notify('Không tạo được ghi chú: ' + error.message);
+    }
   }
 
   function queueSave(id, patch) {
@@ -199,7 +211,10 @@ function App() {
     saveTimer.current = setTimeout(async () => {
       const batch = Array.from(pendingSaves.current.entries());
       pendingSaves.current.clear();
-      const results = await Promise.all(batch.map(([noteId, changes]) => supabase.from('notes').update(changes).eq('id', noteId)));
+      const results = await Promise.all(batch.map(async ([noteId, changes]) => {
+        try { return await requestApi(adminKey, 'update', { id: noteId, patch: changes }); }
+        catch (error) { return { error }; }
+      }));
       const failed = results.find((result) => result.error)?.error;
       setSaving(pendingSaves.current.size > 0);
       if (failed) notify('Lưu thất bại: ' + failed.message);
@@ -212,8 +227,9 @@ function App() {
     patch = { ...queuedPatch, ...patch };
     const previous = notes.find((note) => note.id === id);
     setNotes((current) => current.map((note) => note.id === id ? { ...note, ...patch, updated_at: new Date().toISOString() } : note));
-    const { error } = await supabase.from('notes').update(patch).eq('id', id);
-    if (error) {
+    try {
+      await requestApi(adminKey, 'update', { id, patch });
+    } catch (error) {
       if (previous) setNotes((current) => current.map((note) => note.id === id ? previous : note));
       notify('Thao tác thất bại: ' + error.message);
     }
@@ -232,12 +248,13 @@ function App() {
   }
 
   async function permanentlyDelete(note) {
-    const { error } = await supabase.from('notes').delete().eq('id', note.id);
-    if (error) notify('Không xóa được: ' + error.message);
-    else {
+    try {
+      await requestApi(adminKey, 'delete', { id: note.id });
       setNotes((current) => current.filter((item) => item.id !== note.id));
       setSelectedId(null);
       notify('Đã xóa vĩnh viễn');
+    } catch (error) {
+      notify('Không xóa được: ' + error.message);
     }
   }
 
@@ -255,13 +272,11 @@ function App() {
     setInstallPrompt(null);
   }
 
-  if (!authReady) return <div className="boot-screen"><div className="brand-mark"><FileText size={23} /></div><span>Đang mở NoteCloud…</span></div>;
+  if (!adminReady) return <div className="boot-screen"><div className="brand-mark"><FileText size={23} /></div><span>Đang mở NoteCloud…</span></div>;
 
-  if (!isSupabaseConfigured) {
-    return <SetupScreen />;
-  }
+  if (!isSupabaseConfigured) return <SetupScreen />;
 
-  if (!session) {
+  if (!adminKey) {
     return (
       <div className="auth-layout">
         <div className="auth-visual">
@@ -273,24 +288,21 @@ function App() {
             <div className="visual-title">Ý tưởng ở lại.<br /><em>Bạn tự do di chuyển.</em></div>
             <p>Một nơi nhỏ để lưu giữ những điều quan trọng — đồng bộ trên mọi thiết bị.</p>
           </div>
-          <div className="visual-footer"><span><ShieldCheck size={14} /> Riêng tư theo tài khoản</span><span>Được tạo cho những ngày bận rộn</span></div>
+          <div className="visual-footer"><span><ShieldCheck size={14} /> Truy cập bằng Admin Key</span><span>Được tạo cho những ngày bận rộn</span></div>
         </div>
         <main className="auth-panel">
           <div className="auth-mobile-brand"><span className="brand-mark"><FileText size={20} /></span> notecloud</div>
           <div className="auth-form-wrap">
-            <div className="auth-eyebrow">CHÀO MỪNG BẠN</div>
-            <h1>{authMode === 'login' ? 'Rất vui được gặp lại.' : 'Tạo không gian của bạn.'}</h1>
-            <p className="auth-subtitle">{authMode === 'login' ? 'Đăng nhập để tiếp tục với những ghi chú của bạn.' : 'Chỉ vài bước đơn giản để bắt đầu lưu lại ý tưởng.'}</p>
-            <form onSubmit={handleAuth} className="auth-form">
-              <label>Email của bạn</label>
-              <input type="email" autoComplete="email" placeholder="ban@example.com" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} required />
-              <div className="password-label"><label>Mật khẩu</label>{authMode === 'login' && <span>Tối thiểu 6 ký tự</span>}</div>
-              <input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} placeholder="Nhập mật khẩu" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} required minLength={6} />
-              {authMessage && <div className="auth-message">{authMessage}</div>}
-              <button className="primary-button auth-submit" type="submit" disabled={authBusy}>{authBusy ? 'Đang xử lý…' : authMode === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'} <span>→</span></button>
+            <div className="auth-eyebrow">KHÔNG GIAN RIÊNG CỦA BẠN</div>
+            <h1>Mở khóa NoteCloud.</h1>
+            <p className="auth-subtitle">Nhập Admin Key để xem và chỉnh sửa ghi chú trên các thiết bị của bạn.</p>
+            <form onSubmit={unlockApp} className="auth-form">
+              <label>Admin Key</label>
+              <input type="password" autoComplete="current-password" placeholder="Nhập Admin Key" value={keyInput} onChange={(e) => setKeyInput(e.target.value)} required minLength={12} />
+              {keyMessage && <div className="auth-message">{keyMessage}</div>}
+              <button className="primary-button auth-submit" type="submit" disabled={keyBusy}><KeyRound size={16} /> {keyBusy ? 'Đang kiểm tra…' : 'Mở NoteCloud'} <span>→</span></button>
             </form>
-            <div className="auth-switch">{authMode === 'login' ? 'Bạn chưa có tài khoản?' : 'Bạn đã có tài khoản?'} <button onClick={() => { setAuthMode(authMode === 'login' ? 'signup' : 'login'); setAuthMessage(''); }}>{authMode === 'login' ? 'Đăng ký' : 'Đăng nhập'}</button></div>
-            <div className="auth-trust"><ShieldCheck size={15} /> Ghi chú của bạn được bảo vệ riêng theo tài khoản.</div>
+            <div className="auth-trust"><ShieldCheck size={15} /> Không cần đăng ký tài khoản. Dùng cùng Admin Key trên mọi thiết bị.</div>
           </div>
           <div className="auth-bottom">NOTE TO SELF · NOTE TO LIFE</div>
         </main>
@@ -313,12 +325,12 @@ function App() {
           })}
         </nav>
         <div className="sidebar-bottom">
-          <div className="sync-card"><div className="sync-icon"><Cloud size={16} /></div><div><b>Đã đồng bộ</b><span>Ghi chú trên mọi thiết bị</span></div><span className="sync-dot"></span></div>
+          <div className="sync-card"><div className="sync-icon"><Cloud size={16} /></div><div><b>Đã đồng bộ</b><span>Làm mới giữa các thiết bị</span></div><span className="sync-dot"></span></div>
           {installPrompt && <button className="install-link" onClick={installApp}><Smartphone size={16} /> Cài NoteCloud</button>}
           <div className="account-row">
-            <div className="avatar">{session.user.email?.[0]?.toUpperCase() || 'N'}</div>
-            <div className="account-info"><b>{session.user.email?.split('@')[0]}</b><span>{session.user.email}</span></div>
-            <div className="account-menu-wrap"><button className="icon-button account-menu-btn" onClick={() => setMenuOpen(!menuOpen)}><MoreHorizontal size={19} /></button>{menuOpen && <div className="account-popover"><div className="popover-email">{session.user.email}</div><button onClick={signOut}><LogOut size={15} /> Đăng xuất</button></div>}</div>
+            <div className="avatar"><KeyRound size={15} /></div>
+            <div className="account-info"><b>Quản trị viên</b><span>Đã mở khóa bằng Admin Key</span></div>
+            <div className="account-menu-wrap"><button className="icon-button account-menu-btn" title="Khóa ứng dụng" onClick={lockApp}><Lock size={17} /></button></div>
           </div>
         </div>
       </aside>
@@ -356,7 +368,7 @@ function App() {
                     <button className={`toolbar-button ${selectedNote.is_pinned ? 'tool-active' : ''}`} onClick={() => updateImmediate(selectedNote.id, { is_pinned: !selectedNote.is_pinned })}><Pin size={16} /><span>{selectedNote.is_pinned ? 'Bỏ ghim' : 'Ghim'}</span></button>
                     <button className="toolbar-button" onClick={() => { updateImmediate(selectedNote.id, { is_archived: !selectedNote.is_archived }); setSelectedId(null); setMobileListOpen(true); }}><Archive size={16} /><span>{selectedNote.is_archived ? 'Bỏ lưu trữ' : 'Lưu trữ'}</span></button>
                   </>}
-                  <div className="more-wrap"><button className="icon-button" onClick={() => setMenuOpen(!menuOpen)}><MoreHorizontal size={19} /></button>{menuOpen && <div className="account-popover note-popover"><button className="danger-action" onClick={() => { setMenuOpen(false); selectedNote.deleted_at ? permanentlyDelete(selectedNote) : moveToTrash(selectedNote); }}>{selectedNote.deleted_at ? <Trash2 size={15} /> : <Trash2 size={15} />}{selectedNote.deleted_at ? 'Xóa vĩnh viễn' : 'Chuyển vào thùng rác'}</button></div>}</div>
+                  <div className="more-wrap"><button className="icon-button" onClick={() => setMenuOpen(!menuOpen)}><MoreHorizontal size={19} /></button>{menuOpen && <div className="account-popover note-popover"><button className="danger-action" onClick={() => { setMenuOpen(false); selectedNote.deleted_at ? permanentlyDelete(selectedNote) : moveToTrash(selectedNote); }}><Trash2 size={15} />{selectedNote.deleted_at ? 'Xóa vĩnh viễn' : 'Chuyển vào thùng rác'}</button></div>}</div>
                 </div></div>
                 <div className="editor-document"><div className="document-meta"><span>{selectedNote.created_at ? 'TẠO NGÀY ' + new Date(selectedNote.created_at).toLocaleDateString('vi-VN') : 'GHI CHÚ MỚI'}</span><span className="meta-divider"></span><span>{(selectedNote.content || '').trim() ? selectedNote.content.trim().split(/\s+/).length + ' TỪ' : 'CHƯA CÓ NỘI DUNG'}</span></div>
                   <input className="title-input" placeholder="Tiêu đề ghi chú" value={selectedNote.title} onChange={(e) => queueSave(selectedNote.id, { title: e.target.value })} disabled={Boolean(selectedNote.deleted_at)} />
@@ -377,7 +389,7 @@ function App() {
 }
 
 function SetupScreen() {
-  return <div className="setup-screen"><div className="setup-card"><div className="brand"><span className="brand-mark"><FileText size={20} /></span> notecloud</div><div className="setup-icon"><Settings size={25} /></div><h1>Cần kết nối cơ sở dữ liệu</h1><p>Ứng dụng đã sẵn sàng. Hãy cấu hình Supabase để bật đăng ký, đăng nhập và đồng bộ ghi chú giữa các thiết bị.</p><ol><li>Mở file <code>.env.example</code> và điền URL cùng anon key từ Supabase.</li><li>Lưu thành file <code>.env</code> trong thư mục dự án.</li><li>Chạy file <code>supabase-schema.sql</code> trong SQL Editor của Supabase.</li><li>Khởi động lại ứng dụng bằng <code>npm run dev</code>.</li></ol><div className="setup-note"><ShieldCheck size={17} /> Không đưa service_role key vào ứng dụng. Chỉ dùng anon/publishable key.</div></div></div>;
+  return <div className="setup-screen"><div className="setup-card"><div className="brand"><span className="brand-mark"><FileText size={20} /></span> notecloud</div><div className="setup-icon"><Settings size={25} /></div><h1>Cần kết nối cơ sở dữ liệu</h1><p>Hãy cấu hình Supabase để lưu và đồng bộ ghi chú. Phiên bản này dùng một Admin Key chung thay cho đăng ký/đăng nhập.</p><ol><li>Điền Project URL và anon/publishable key vào file <code>.env</code>.</li><li>Chạy file <code>supabase-schema.sql</code> trong Supabase SQL Editor.</li><li>Deploy Edge Function <code>note-api</code> và đặt secret <code>NOTE_ADMIN_KEY</code>.</li><li>Khởi động ứng dụng bằng <code>npm run dev</code>.</li></ol><div className="setup-note"><ShieldCheck size={17} /> Admin Key được kiểm tra ở máy chủ; không đặt khóa bí mật trong mã frontend.</div></div></div>;
 }
 
 createRoot(document.getElementById('root')).render(<App />);

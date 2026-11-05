@@ -1,0 +1,2 @@
+[functions.note-api]
+verify_jwt = false

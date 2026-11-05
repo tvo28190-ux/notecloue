@@ -1,87 +1,97 @@
-# NoteCloud — ứng dụng ghi chú đa thiết bị
+# NoteCloud — ghi chú đa thiết bị, mở bằng Admin Key
 
-NoteCloud là web app ghi chú responsive, dùng được trên máy tính và điện thoại. Người dùng đăng ký/đăng nhập bằng email và mật khẩu; ghi chú được lưu trên Supabase nên có thể đăng nhập cùng tài khoản ở nhiều thiết bị để xem và sửa cùng một dữ liệu.
+NoteCloud là web app ghi chú responsive cho máy tính và điện thoại. Phiên bản này **bỏ đăng ký/đăng nhập email**: người quản trị mở ứng dụng bằng một Admin Key dùng chung. Cùng Admin Key có thể mở cùng kho ghi chú trên nhiều thiết bị.
 
 ## Tính năng
 
-- Đăng ký, đăng nhập và đăng xuất bằng email/mật khẩu.
+- Mở khóa bằng Admin Key, không cần tài khoản người dùng.
 - Tạo, sửa và tự động lưu ghi chú.
-- Tìm kiếm theo tiêu đề và nội dung.
-- Ghim ghi chú, lưu trữ, chuyển vào thùng rác, khôi phục hoặc xóa vĩnh viễn.
-- Giao diện tiếng Việt, tự thích ứng với máy tính và điện thoại.
-- Có manifest và service worker để hỗ trợ cài app (PWA) từ trình duyệt.
-- Phân quyền dữ liệu theo tài khoản bằng Row Level Security (RLS) của Supabase.
+- Tìm kiếm, ghim, lưu trữ, chuyển vào thùng rác, khôi phục và xóa vĩnh viễn.
+- Giao diện tiếng Việt, tương thích điện thoại/máy tính và cài được như PWA.
+- Ghi chú lưu trên Supabase; thiết bị đang mở tự làm mới dữ liệu khoảng 10 giây/lần.
 
-> Đồng bộ ghi chú cần kết nối Internet. Service worker chỉ lưu bộ khung giao diện; bản này chưa hỗ trợ sửa ghi chú ngoại tuyến rồi tự đồng bộ trở lại.
+## Bảo mật quan trọng
 
-## 1. Tạo backend miễn phí với Supabase
+Admin Key **không được nhúng vào mã frontend**. Key được lưu trong Supabase Edge Function secret `NOTE_ADMIN_KEY`; Edge Function kiểm tra key rồi mới thao tác database bằng Secret API Key ở phía máy chủ. Trình duyệt chỉ có Supabase anon/publishable key.
 
-1. Tạo project tại [https://supabase.com](https://supabase.com).
-2. Mở **Project Settings → API** (hoặc **Data API / API Keys**, tùy giao diện) và sao chép Project URL cùng anon/public key.
-3. Trong thư mục dự án, sao chép `.env.example` thành `.env` rồi điền hai giá trị:
+Ai có Admin Key đều có thể đọc, sửa và xóa toàn bộ ghi chú. Hãy dùng key dài, ngẫu nhiên (ít nhất 32 ký tự), không chia sẻ và không gửi key trong ảnh chụp màn hình/chat. Nút khóa ở thanh bên chỉ xóa key đã lưu trên thiết bị hiện tại; muốn thay key trên mọi thiết bị, đổi secret `NOTE_ADMIN_KEY` ở Supabase.
 
-```env
-VITE_SUPABASE_URL=https://YOUR_PROJECT_ID.supabase.co
-VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
-```
+## 1. Cấu hình Supabase
 
-4. Mở **SQL Editor** trong Supabase, chạy toàn bộ nội dung file `supabase-schema.sql` để tạo bảng và chính sách bảo mật.
-5. Trong **Authentication → URL Configuration**, đặt Site URL thành địa chỉ app sau khi deploy. Thêm `http://localhost:5173` vào Redirect URLs để thử ở máy cá nhân.
-6. Nếu muốn người dùng xác nhận email trước khi đăng nhập, giữ Email Confirmations bật. Khi đó sau khi đăng ký, người dùng cần mở thư xác nhận.
+### A. Cập nhật bảng ghi chú
 
-**An toàn:** chỉ đưa anon/publishable key vào biến `VITE_SUPABASE_ANON_KEY`. Tuyệt đối không đưa `service_role` key vào frontend hoặc commit file `.env` lên GitHub.
+1. Mở project Supabase → **SQL Editor** → **New query**.
+2. Mở file `supabase-schema.sql` trong gói này, sao chép toàn bộ và dán vào SQL Editor.
+3. Nhấn **Run**. File tương thích cả trường hợp bạn đã chạy schema cũ có `user_id NOT NULL`; nó sẽ cho phép `user_id` rỗng và gỡ quyền truy cập trực tiếp của anon/authenticated, để chỉ Edge Function truy cập dữ liệu.
 
-## 2. Chạy ở máy tính
+### B. Tạo Admin Key bí mật
 
-Cần cài Node.js bản LTS. Mở terminal tại thư mục dự án và chạy:
+Tạo một chuỗi ngẫu nhiên dài ít nhất 32 ký tự bằng trình quản lý mật khẩu hoặc công cụ tạo mật khẩu. Không dùng database password, anon/publishable key hay Secret/service-role key làm Admin Key.
+
+### C. Lưu Admin Key vào Supabase Secrets
+
+1. Trong Dashboard của project, mở **Edge Functions → Secrets** (trang Edge Function Secrets).
+2. Thêm một secret với:
+   - **Key:** `NOTE_ADMIN_KEY`
+   - **Value:** chuỗi Admin Key ngẫu nhiên bạn vừa tạo.
+3. Nhấn **Save**. Supabase cung cấp sẵn `SUPABASE_URL` và Secret API Key cho Edge Function; không cần tự chép Secret/service-role key vào code.
+
+### D. Tạo và deploy Edge Function
+
+1. Trong thanh bên project, chọn **Edge Functions**.
+2. Nhấn **Deploy a new function → Via Editor**.
+3. Đặt tên function là `note-api`.
+4. Mở file `supabase/functions/note-api/index.ts` trong gói mã nguồn, sao chép toàn bộ nội dung và thay mã mẫu trong trình soạn thảo Supabase.
+5. Nhấn **Deploy function**.
+6. Sau khi deploy, mở function `note-api` → tab **Details** và tắt **Enforce JWT Verification / Verify JWT**. Function đã tự kiểm tra header `x-admin-key`; nếu bật thêm JWT cũ, trình duyệt có thể bị chặn trước khi code chạy.
+
+Tài liệu Supabase về tạo function trên Dashboard: https://supabase.com/docs/guides/functions/quickstart-dashboard
+
+## 2. Chạy ứng dụng trên máy tính
+
+Cài Node.js LTS. Trong thư mục dự án:
 
 ```bash
 npm install
+```
+
+Sao chép `.env.example` thành `.env`, rồi điền Project URL và anon/publishable key trong Supabase → Project Settings → API Keys:
+
+```env
+VITE_SUPABASE_URL=https://YOUR_PROJECT_ID.supabase.co
+VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
+```
+
+Khởi động:
+
+```bash
 npm run dev
 ```
 
-Mở địa chỉ Vite in ra (thường là `http://localhost:5173`). Để kiểm tra bản production:
+Mở địa chỉ Vite hiển thị (thường là `http://localhost:5173`). Khi màn hình mở khóa xuất hiện, nhập Admin Key đã lưu ở bước C.
 
-```bash
-npm run build
-npm run preview
-```
+## 3. Đưa lên Internet để dùng cả máy tính và điện thoại
 
-## 3. Đưa lên Internet để dùng trên máy tính và điện thoại
-
-Cách dễ nhất là deploy bằng Vercel:
-
-1. Đẩy thư mục dự án lên một GitHub repository riêng (không đẩy file `.env`).
-2. Vào [https://vercel.com](https://vercel.com), import repository.
-3. Giữ Build Command là `npm run build`, Output Directory là `dist`.
-4. Thêm hai Environment Variables `VITE_SUPABASE_URL` và `VITE_SUPABASE_ANON_KEY` trong phần cài đặt project của Vercel.
-5. Deploy. Sau khi có domain, quay lại Supabase → Authentication → URL Configuration để cập nhật Site URL và thêm domain vào Redirect URLs.
-
-Từ máy tính hoặc điện thoại, mở cùng địa chỉ website và đăng nhập cùng một tài khoản. Trên điện thoại, có thể chọn **Add to Home Screen / Thêm vào màn hình chính** trong menu trình duyệt. Trên một số trình duyệt máy tính, có thể chọn biểu tượng cài đặt ứng dụng ở thanh địa chỉ.
+1. Đẩy mã nguồn lên repository GitHub riêng. Không đẩy file `.env` hoặc Admin Key.
+2. Import repository vào Vercel.
+3. Build Command: `npm run build`; Output Directory: `dist`.
+4. Thêm hai biến môi trường `VITE_SUPABASE_URL` và `VITE_SUPABASE_ANON_KEY` trong Vercel.
+5. Deploy. Mở domain vừa có trên cả máy tính và điện thoại.
+6. Nhập cùng Admin Key trên mỗi thiết bị. Có thể chọn “Add to Home Screen / Thêm vào màn hình chính” để cài như app.
 
 ## Cấu trúc dự án
 
 ```text
 notecloud-app/
-├── public/
-│   ├── manifest.webmanifest
-│   ├── note-icon.svg
-│   └── sw.js
-├── src/
-│   ├── main.jsx
-│   ├── style.css
-│   └── supabase.js
-├── .env.example
-├── index.html
+├── public/                         # PWA manifest, icon, service worker
+├── src/                             # React app và giao diện
+├── supabase/
+│   ├── config.toml
+│   └── functions/note-api/index.ts  # API kiểm tra Admin Key
 ├── supabase-schema.sql
+├── .env.example
+├── .gitignore
+├── index.html
 ├── package.json
 └── vite.config.js
 ```
-
-## Ghi chú kỹ thuật
-
-- Frontend: React + Vite.
-- Đăng nhập và lưu trữ: Supabase Auth + Postgres.
-- Mỗi bản ghi được gắn `user_id`; RLS giới hạn SELECT/INSERT/UPDATE/DELETE theo `auth.uid()`.
-- Supabase Realtime phát thay đổi tới các thiết bị đang mở cùng tài khoản; cột `updated_at` được cập nhật tự động ở database.
-- Nội dung ghi chú được lưu dạng văn bản thuần. Không có chia sẻ ghi chú giữa các tài khoản trong phiên bản này.
