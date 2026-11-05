@@ -1,0 +1,13 @@
+{
+  "name": "NoteCloud — Ghi chú mọi nơi",
+  "short_name": "NoteCloud",
+  "description": "Ghi chú của bạn, đồng bộ trên mọi thiết bị.",
+  "lang": "vi-VN",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f7f5",
+  "theme_color": "#f7f7f5",
+  "icons": [
+    { "src": "/note-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
